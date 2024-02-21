@@ -1,4 +1,5 @@
-//===-- PIMLowering.cpp - Lowers PIM Specific Intrinsics to external function call --------------------------===//
+//===-- PIMLowering.cpp - Lowers PIM Specific Intrinsics to external function
+// call --------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -18,29 +19,49 @@
 
 using namespace llvm;
 
-CallInst *replaceAddIntrinsic(IntrinsicInst *II, llvm::Module *mod) {
-  Function *PAdd = Function::Create(II->getFunctionType(),
-                                    Function::ExternalLinkage, "pimAdd", mod);
+std::vector<Instruction *> InstructionToDelete;
+
+void replaceAddIntrinsic(IntrinsicInst *II, llvm::Module *module) {
+
   std::vector<Value *> PAddArgs;
+  std::vector<Type *> PAddArgTypes;
   for (uint16_t i = 0; i < II->getFunctionType()->getNumParams(); i++) {
-    PAddArgs.push_back(II->getArgOperand(i));
+    auto *val = II->getArgOperand(i);
+    if (isa<LoadInst>(val)) {
+      LoadInst *LI = dyn_cast<LoadInst>(val);
+      PAddArgTypes.push_back(LI->getPointerOperandType());
+      PAddArgs.push_back(LI->getPointerOperand());
+    }
   }
-  return CallInst::Create(PAdd, PAddArgs, "", II);
+  Instruction *InsertBeforeInstruction = II;
+  for (auto U : II->users()) {
+    if (isa<StoreInst>(U)) {
+      StoreInst *SI = dyn_cast<StoreInst>(U);
+      PAddArgTypes.push_back(SI->getPointerOperandType());
+      PAddArgs.push_back(SI->getPointerOperand());
+      InstructionToDelete.push_back(SI);
+      InsertBeforeInstruction = SI;
+    }
+  }
+  FunctionType *PAddTy =
+      FunctionType::get(Type::getVoidTy(II->getContext()), PAddArgTypes, false);
+  Function *PAdd =
+      Function::Create(PAddTy, Function::ExternalLinkage, "pimAdd", module);
+  CallInst::Create(PAdd, PAddArgs, "", InsertBeforeInstruction);
+  return;
 }
 
 PreservedAnalyses PIMLoweringPass::run(Function &F,
                                        FunctionAnalysisManager &AM) {
-  llvm::Module *mod = F.getParent();
-  std::vector<Instruction *> instrToDel;
+  llvm::Module *module = F.getParent();
   for (auto &B : F) {
     for (auto &I : B) {
       IntrinsicInst *II = dyn_cast<IntrinsicInst>(&I);
       if (II) {
         switch (II->getIntrinsicID()) {
         case Intrinsic::PIMIntrinsics::pim_add: {
-          I.replaceAllUsesWith(
-              dyn_cast<Instruction>(replaceAddIntrinsic(II, mod)));
-          instrToDel.push_back(&I);
+          replaceAddIntrinsic(II, module);
+          InstructionToDelete.push_back(&I);
           break;
         }
         default:
@@ -50,10 +71,10 @@ PreservedAnalyses PIMLoweringPass::run(Function &F,
     }
   }
 
-  for (auto ins : instrToDel) {
-    ins->eraseFromParent();
+  for (auto I : InstructionToDelete) {
+    I->eraseFromParent();
   }
-  instrToDel.clear();
+  InstructionToDelete.clear();
 
   return PreservedAnalyses::all();
 }
